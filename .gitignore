@@ -2,3 +2,6 @@
 .env
 __pycache__/
 *.pyc
+gambling.db
+gambling.db-shm
+gambling.db-wal

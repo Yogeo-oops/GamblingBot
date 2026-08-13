@@ -7,15 +7,29 @@ from models.okpan_wallet import OkpanWallet
 
 class OkpanService:
     """
-    옥판 구매, 무작위 환전, 운영진 지급 및 조회를 담당한다.
+    옥판 구매, 환전, 운영진 지급/차감,
+    지갑 조회를 담당한다.
+
+    SQLite 기반으로 동작한다.
     """
 
-    # 돈으로 옥판 구매
-    # 100문 = 옥판 1개
+    # ============================================
+    # 옥판 가격
+    # ============================================
+
+    # 돈으로 구매할 때
+    # 옥판 1개 = 100문
     OKPAN_PURCHASE_PRICE = 100
 
-    # 옥판 등급별 환전 가치
-    GRADE_1_VALUE = 2000
+    # ============================================
+    # 내부 등급별 환전 가치
+    # ============================================
+    #
+    # 1등급 = 기본 가격의 20배
+    # 2등급 = 기본 가격의 1배
+    # 3등급 = 기본 가격의 0.2배
+
+    GRADE_1_VALUE = 2_000
     GRADE_2_VALUE = 100
     GRADE_3_VALUE = 20
 
@@ -32,7 +46,10 @@ class OkpanService:
         conn = await Database.get_connection()
 
         try:
-            await conn.start_transaction()
+
+            await conn.execute(
+                "BEGIN IMMEDIATE"
+            )
 
             await self._create_or_update_user(
                 conn,
@@ -50,11 +67,17 @@ class OkpanService:
             return wallet
 
         except Exception:
+
             await conn.rollback()
             raise
 
         finally:
+
             await conn.close()
+
+    # ============================================
+    # 지갑 조회
+    # ============================================
 
     async def get_wallet(
         self,
@@ -64,12 +87,14 @@ class OkpanService:
         conn = await Database.get_connection()
 
         try:
+
             return await self._get_wallet(
                 conn,
                 discord_id
             )
 
         finally:
+
             await conn.close()
 
     # ============================================
@@ -84,6 +109,7 @@ class OkpanService:
     ) -> OkpanWallet:
 
         if amount <= 0:
+
             raise ValueError(
                 "구매할 옥판은 1개 이상이어야 합니다."
             )
@@ -96,42 +122,52 @@ class OkpanService:
         conn = await Database.get_connection()
 
         try:
-            await conn.start_transaction()
 
+            await conn.execute(
+                "BEGIN IMMEDIATE"
+            )
+
+            # 유저 생성 / 닉네임 갱신
             await self._create_or_update_user(
                 conn,
                 discord_id,
                 username
             )
 
-            sql = """
+            # ====================================
+            # 돈 차감 + 2등급 옥판 지급
+            # ====================================
+            #
+            # 돈으로 구매한 옥판은
+            # 전부 내부적으로 2등급이다.
+
+            cursor = await conn.execute(
+                """
                 UPDATE users
-                SET money = money - %s,
-                    okpan_grade_2 = okpan_grade_2 + %s
-                WHERE discord_id = %s
-                  AND money >= %s
-            """
-
-            cursor = await conn.cursor()
-
-            try:
-                await cursor.execute(
-                    sql,
-                    (
-                        cost,
-                        amount,
-                        discord_id,
-                        cost
-                    )
+                SET money = money - ?,
+                    okpan_grade_2 = okpan_grade_2 + ?
+                WHERE discord_id = ?
+                  AND money >= ?
+                """,
+                (
+                    cost,
+                    amount,
+                    discord_id,
+                    cost
                 )
+            )
 
-                if cursor.rowcount != 1:
-                    raise RuntimeError(
-                        "옥판을 구매하기 위한 돈이 부족합니다."
-                    )
+            success = (
+                cursor.rowcount == 1
+            )
 
-            finally:
-                await cursor.close()
+            await cursor.close()
+
+            if not success:
+
+                raise RuntimeError(
+                    "옥판을 구매하기 위한 돈이 부족합니다."
+                )
 
             wallet = await self._get_wallet(
                 conn,
@@ -143,10 +179,12 @@ class OkpanService:
             return wallet
 
         except Exception:
+
             await conn.rollback()
             raise
 
         finally:
+
             await conn.close()
 
     # ============================================
@@ -160,6 +198,7 @@ class OkpanService:
     ) -> OkpanExchangeResult:
 
         if amount <= 0:
+
             raise ValueError(
                 "환전할 옥판은 1개 이상이어야 합니다."
             )
@@ -167,10 +206,14 @@ class OkpanService:
         conn = await Database.get_connection()
 
         try:
-            await conn.start_transaction()
 
-            # 환전 중 해당 유저 행 잠금
-            wallet_before = await self._get_wallet_for_update(
+            # SQLite에는 MySQL의 FOR UPDATE가 없으므로
+            # BEGIN IMMEDIATE로 쓰기 트랜잭션을 잠근다.
+            await conn.execute(
+                "BEGIN IMMEDIATE"
+            )
+
+            wallet_before = await self._get_wallet(
                 conn,
                 discord_id
             )
@@ -180,20 +223,37 @@ class OkpanService:
             )
 
             if total_okpan < amount:
+
                 raise RuntimeError(
                     "보유한 옥판이 부족합니다. "
-                    f"현재 보유 옥판은 {total_okpan}개입니다."
+                    f"현재 보유 옥판은 "
+                    f"{total_okpan:,}개입니다."
                 )
 
-            remaining_grade1 = wallet_before.grade1
-            remaining_grade2 = wallet_before.grade2
-            remaining_grade3 = wallet_before.grade3
+            # ====================================
+            # 현재 등급별 보유량
+            # ====================================
+
+            remaining_grade1 = (
+                wallet_before.grade1
+            )
+
+            remaining_grade2 = (
+                wallet_before.grade2
+            )
+
+            remaining_grade3 = (
+                wallet_before.grade3
+            )
 
             exchanged_grade1 = 0
             exchanged_grade2 = 0
             exchanged_grade3 = 0
 
-            # 실제 보유 옥판 중 하나씩 무작위 선택
+            # ====================================
+            # 실제 보유 옥판 중 무작위 선택
+            # ====================================
+
             for _ in range(amount):
 
                 remaining_total = (
@@ -202,11 +262,16 @@ class OkpanService:
                     + remaining_grade3
                 )
 
-                random_number = random.randrange(
-                    remaining_total
+                random_number = (
+                    random.randrange(
+                        remaining_total
+                    )
                 )
 
-                if random_number < remaining_grade1:
+                if (
+                    random_number
+                    < remaining_grade1
+                ):
 
                     remaining_grade1 -= 1
                     exchanged_grade1 += 1
@@ -224,6 +289,10 @@ class OkpanService:
 
                     remaining_grade3 -= 1
                     exchanged_grade3 += 1
+
+            # ====================================
+            # 환전 금액 계산
+            # ====================================
 
             grade1_money = (
                 exchanged_grade1
@@ -246,36 +315,37 @@ class OkpanService:
                 + grade3_money
             )
 
-            sql = """
+            # ====================================
+            # 옥판 차감 + 돈 지급
+            # ====================================
+
+            cursor = await conn.execute(
+                """
                 UPDATE users
-                SET okpan_grade_1 = okpan_grade_1 - %s,
-                    okpan_grade_2 = okpan_grade_2 - %s,
-                    okpan_grade_3 = okpan_grade_3 - %s,
-                    money = money + %s
-                WHERE discord_id = %s
-            """
+                SET okpan_grade_1 = okpan_grade_1 - ?,
+                    okpan_grade_2 = okpan_grade_2 - ?,
+                    okpan_grade_3 = okpan_grade_3 - ?,
+                    money = money + ?
+                WHERE discord_id = ?
+                """,
+                (
+                    exchanged_grade1,
+                    exchanged_grade2,
+                    exchanged_grade3,
+                    received_money,
+                    discord_id
+                )
+            )
 
-            cursor = await conn.cursor()
+            if cursor.rowcount != 1:
 
-            try:
-                await cursor.execute(
-                    sql,
-                    (
-                        exchanged_grade1,
-                        exchanged_grade2,
-                        exchanged_grade3,
-                        received_money,
-                        discord_id
-                    )
+                await cursor.close()
+
+                raise RuntimeError(
+                    "옥판 환전 정보를 저장하지 못했습니다."
                 )
 
-                if cursor.rowcount != 1:
-                    raise RuntimeError(
-                        "옥판 환전 정보를 저장하지 못했습니다."
-                    )
-
-            finally:
-                await cursor.close()
+            await cursor.close()
 
             wallet_after = await self._get_wallet(
                 conn,
@@ -293,10 +363,12 @@ class OkpanService:
             )
 
         except Exception:
+
             await conn.rollback()
             raise
 
         finally:
+
             await conn.close()
 
     # ============================================
@@ -316,18 +388,24 @@ class OkpanService:
         )
 
         if amount <= 0:
+
             raise ValueError(
                 "지급할 옥판은 1개 이상이어야 합니다."
             )
 
-        grade_column = self._get_grade_column(
-            grade
+        grade_column = (
+            self._get_grade_column(
+                grade
+            )
         )
 
         conn = await Database.get_connection()
 
         try:
-            await conn.start_transaction()
+
+            await conn.execute(
+                "BEGIN IMMEDIATE"
+            )
 
             await self._create_or_update_user(
                 conn,
@@ -335,32 +413,30 @@ class OkpanService:
                 username
             )
 
-            # grade_column은 내부에서만 결정되므로
-            # SQL 문자열에 직접 넣어도 안전하다.
-            sql = f"""
+            # grade_column은 내부에서
+            # 허용된 3개 컬럼 중 하나만 반환한다.
+            cursor = await conn.execute(
+                f"""
                 UPDATE users
-                SET {grade_column} = {grade_column} + %s
-                WHERE discord_id = %s
-            """
+                SET {grade_column}
+                    = {grade_column} + ?
+                WHERE discord_id = ?
+                """,
+                (
+                    amount,
+                    discord_id
+                )
+            )
 
-            cursor = await conn.cursor()
+            if cursor.rowcount != 1:
 
-            try:
-                await cursor.execute(
-                    sql,
-                    (
-                        amount,
-                        discord_id
-                    )
+                await cursor.close()
+
+                raise RuntimeError(
+                    "옥판을 지급할 유저를 찾을 수 없습니다."
                 )
 
-                if cursor.rowcount != 1:
-                    raise RuntimeError(
-                        "옥판을 지급할 유저를 찾을 수 없습니다."
-                    )
-
-            finally:
-                await cursor.close()
+            await cursor.close()
 
             wallet = await self._get_wallet(
                 conn,
@@ -372,44 +448,49 @@ class OkpanService:
             return wallet
 
         except Exception:
+
             await conn.rollback()
             raise
 
         finally:
+
             await conn.close()
 
     # ============================================
-    # 운영진 옥판 지급
+    # 운영진 옥판 차감
     # ============================================
 
     async def remove_okpan(
-    self,
-    discord_id: str,
-    username: str,
-    grade: int,
-    amount: int
+        self,
+        discord_id: str,
+        username: str,
+        grade: int,
+        amount: int
     ) -> OkpanWallet:
 
-        """
-        운영진이 특정 등급의 옥판을 차감한다.
-        해당 등급의 보유량이 부족하면 아무것도 차감하지 않는다.
-        """
-
-        self._validate_grade(grade)
+        self._validate_grade(
+            grade
+        )
 
         if amount <= 0:
+
             raise ValueError(
                 "차감할 옥판은 1개 이상이어야 합니다."
             )
 
-        grade_column = self._get_grade_column(
-            grade
+        grade_column = (
+            self._get_grade_column(
+                grade
+            )
         )
 
         conn = await Database.get_connection()
 
         try:
-            await conn.start_transaction()
+
+            await conn.execute(
+                "BEGIN IMMEDIATE"
+            )
 
             await self._create_or_update_user(
                 conn,
@@ -417,33 +498,36 @@ class OkpanService:
                 username
             )
 
-            sql = f"""
+            # ====================================
+            # 해당 등급 옥판이 충분할 때만 차감
+            # ====================================
+
+            cursor = await conn.execute(
+                f"""
                 UPDATE users
-                SET {grade_column} = {grade_column} - %s
-                WHERE discord_id = %s
-                AND {grade_column} >= %s
-            """
-
-            cursor = await conn.cursor()
-
-            try:
-                await cursor.execute(
-                    sql,
-                    (
-                        amount,
-                        discord_id,
-                        amount
-                    )
+                SET {grade_column}
+                    = {grade_column} - ?
+                WHERE discord_id = ?
+                  AND {grade_column} >= ?
+                """,
+                (
+                    amount,
+                    discord_id,
+                    amount
                 )
+            )
 
-                if cursor.rowcount != 1:
-                    raise RuntimeError(
-                        "해당 등급의 옥판이 부족하여 "
-                        "차감하지 못했습니다."
-                    )
+            success = (
+                cursor.rowcount == 1
+            )
 
-            finally:
-                await cursor.close()
+            await cursor.close()
+
+            if not success:
+
+                raise RuntimeError(
+                    "해당 등급의 옥판이 부족합니다."
+                )
 
             wallet = await self._get_wallet(
                 conn,
@@ -455,10 +539,12 @@ class OkpanService:
             return wallet
 
         except Exception:
+
             await conn.rollback()
             raise
 
         finally:
+
             await conn.close()
 
     # ============================================
@@ -472,33 +558,27 @@ class OkpanService:
         username: str
     ) -> None:
 
-        sql = """
+        await conn.execute(
+            """
             INSERT INTO users (
                 discord_id,
                 username,
                 money
             )
-            VALUES (%s, %s, 0)
-            ON DUPLICATE KEY UPDATE
-                username = VALUES(username)
-        """
+            VALUES (?, ?, 0)
 
-        cursor = await conn.cursor()
-
-        try:
-            await cursor.execute(
-                sql,
-                (
-                    discord_id,
-                    username
-                )
+            ON CONFLICT(discord_id)
+            DO UPDATE SET
+                username = excluded.username
+            """,
+            (
+                discord_id,
+                username
             )
-
-        finally:
-            await cursor.close()
+        )
 
     # ============================================
-    # 일반 지갑 조회
+    # 내부 지갑 조회
     # ============================================
 
     async def _get_wallet(
@@ -507,93 +587,48 @@ class OkpanService:
         discord_id: str
     ) -> OkpanWallet:
 
-        sql = """
+        cursor = await conn.execute(
+            """
             SELECT
                 money,
                 okpan_grade_1,
                 okpan_grade_2,
                 okpan_grade_3
             FROM users
-            WHERE discord_id = %s
-        """
-
-        cursor = await conn.cursor(
-            dictionary=True
+            WHERE discord_id = ?
+            """,
+            (
+                discord_id,
+            )
         )
 
-        try:
-            await cursor.execute(
-                sql,
-                (discord_id,)
+        row = await cursor.fetchone()
+
+        await cursor.close()
+
+        if row is None:
+
+            raise RuntimeError(
+                "유저의 지갑 정보를 찾을 수 없습니다."
             )
 
-            row = await cursor.fetchone()
-
-            if row is not None:
-                return OkpanWallet(
-                    money=row["money"],
-                    grade1=row["okpan_grade_1"],
-                    grade2=row["okpan_grade_2"],
-                    grade3=row["okpan_grade_3"]
-                )
-
-        finally:
-            await cursor.close()
-
-        raise RuntimeError(
-            "유저의 지갑 정보를 찾을 수 없습니다."
-        )
-
-    # ============================================
-    # 잠금 상태로 지갑 조회
-    # ============================================
-
-    async def _get_wallet_for_update(
-        self,
-        conn,
-        discord_id: str
-    ) -> OkpanWallet:
-
-        sql = """
-            SELECT
-                money,
-                okpan_grade_1,
-                okpan_grade_2,
-                okpan_grade_3
-            FROM users
-            WHERE discord_id = %s
-            FOR UPDATE
-        """
-
-        cursor = await conn.cursor(
-            dictionary=True
-        )
-
-        try:
-            await cursor.execute(
-                sql,
-                (discord_id,)
+        return OkpanWallet(
+            money=int(
+                row["money"]
+            ),
+            grade1=int(
+                row["okpan_grade_1"]
+            ),
+            grade2=int(
+                row["okpan_grade_2"]
+            ),
+            grade3=int(
+                row["okpan_grade_3"]
             )
-
-            row = await cursor.fetchone()
-
-            if row is not None:
-                return OkpanWallet(
-                    money=row["money"],
-                    grade1=row["okpan_grade_1"],
-                    grade2=row["okpan_grade_2"],
-                    grade3=row["okpan_grade_3"]
-                )
-
-        finally:
-            await cursor.close()
-
-        raise RuntimeError(
-            "유저의 지갑 정보를 찾을 수 없습니다."
         )
 
     # ============================================
-    # 등급 컬럼
+    # 등급별 DB 컬럼
     # ============================================
 
     def _get_grade_column(
@@ -605,16 +640,16 @@ class OkpanService:
             grade
         )
 
-        columns = {
-            1: "okpan_grade_1",
-            2: "okpan_grade_2",
-            3: "okpan_grade_3",
-        }
+        if grade == 1:
+            return "okpan_grade_1"
 
-        return columns[grade]
+        if grade == 2:
+            return "okpan_grade_2"
+
+        return "okpan_grade_3"
 
     # ============================================
-    # 등급 검증
+    # 등급 검사
     # ============================================
 
     def _validate_grade(
@@ -622,7 +657,13 @@ class OkpanService:
         grade: int
     ) -> None:
 
-        if grade not in (1, 2, 3):
+        if grade not in (
+            1,
+            2,
+            3
+        ):
+
             raise ValueError(
-                "옥판 등급은 1등급부터 3등급까지만 가능합니다."
+                "옥판 등급은 1등급부터 "
+                "3등급까지만 가능합니다."
             )

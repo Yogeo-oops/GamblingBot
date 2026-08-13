@@ -6,6 +6,8 @@ import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 
+from database import Database
+
 # ============================================
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -16,6 +18,8 @@ load_dotenv(
     override=True
 )
 
+# ============================================
+# Command
 # ============================================
 
 from commands.wallet import WalletCommand
@@ -30,19 +34,22 @@ from commands.help import HelpCommand
 from commands.food_store import FoodStoreCommand
 from commands.general_store import GeneralStoreCommand
 
-
 from scheduler.salary_scheduler import SalaryScheduler
 
+
 # ============================================
-# .env 불러오기
+# 환경변수
 # ============================================
 
-TOKEN = os.getenv("DISCORD_TOKEN")
+TOKEN = os.getenv(
+    "DISCORD_TOKEN"
+)
 
 if not TOKEN:
     raise RuntimeError(
         ".env에 DISCORD_TOKEN이 없습니다."
     )
+
 
 # ============================================
 # Bot
@@ -50,31 +57,37 @@ if not TOKEN:
 
 class GamblingBot(commands.Bot):
 
-    def __init__(self):
+    def __init__(
+        self
+    ):
 
-        intents = discord.Intents.default()
+        intents = (
+            discord.Intents.default()
+        )
 
         super().__init__(
             command_prefix="!",
             intents=intents
         )
 
-        # 봇 시작 직후 월급 확인을
+        # 봇 시작 직후 일급 확인을
         # 한 번만 실행하기 위한 변수
         self.startup_salary_checked = False
 
-        # SalaryScheduler 객체를 저장
+        # SalaryScheduler 객체 저장
         self.salary_scheduler: SalaryScheduler | None = None
 
-    # ============================================
+    # ========================================
     # 봇 시작 준비
-    # ============================================
+    # ========================================
 
-    async def setup_hook(self):
+    async def setup_hook(
+        self
+    ):
 
-        # ----------------------------
+        # ====================================
         # Command 등록
-        # ----------------------------
+        # ====================================
 
         await self.add_cog(
             WalletCommand(self)
@@ -120,29 +133,42 @@ class GamblingBot(commands.Bot):
             GeneralStoreCommand(self)
         )
 
-        # ----------------------------
-        # 월급 스케줄러 등록
-        # ----------------------------
+        # ====================================
+        # 일급 스케줄러 등록
+        # ====================================
 
-        self.salary_scheduler = SalaryScheduler(self)
+        self.salary_scheduler = (
+            SalaryScheduler(self)
+        )
 
         await self.add_cog(
             self.salary_scheduler
         )
 
-        # ----------------------------
+        # ====================================
         # 슬래시 명령어 Discord 등록
-        # ----------------------------
+        # ====================================
 
-        synced = await self.tree.sync()
-
-        print("현재 로드된 명령어:")
-
-        for command in self.tree.get_commands():
-            print("-", command.name)
+        synced = (
+            await self.tree.sync()
+        )
 
         print(
-            f"명령어 등록 완료: {len(synced)}개"
+            "현재 로드된 명령어:"
+        )
+
+        for command in (
+            self.tree.get_commands()
+        ):
+
+            print(
+                "-",
+                command.name
+            )
+
+        print(
+            f"명령어 등록 완료: "
+            f"{len(synced)}개"
         )
 
 
@@ -161,19 +187,32 @@ bot = GamblingBot()
 async def on_ready():
 
     print("=" * 40)
-    print(f"{bot.user} 로그인 완료")
+    print(
+        f"{bot.user} 로그인 완료"
+    )
     print("=" * 40)
 
-    # 봇 실행 시 오늘 일급 지급 여부를 한 번 확인
+    # ========================================
+    # 봇 실행 시 오늘 일급 지급 여부
+    # 한 번 확인
+    # ========================================
+
     if (
         not bot.startup_salary_checked
         and bot.salary_scheduler is not None
     ):
+
         bot.startup_salary_checked = True
 
-        await bot.salary_scheduler._run_salary_payment()
+        await (
+            bot.salary_scheduler
+            ._run_salary_payment()
+        )
 
-    print("도박봇 실행 완료!")
+    print(
+        "도박봇 실행 완료!"
+    )
+
 
 # ============================================
 # 프로그램 시작
@@ -181,9 +220,32 @@ async def on_ready():
 
 async def main():
 
-    async with bot:
-        await bot.start(TOKEN)
+    # ========================================
+    # SQLite 초기화
+    # ========================================
+    #
+    # gambling.db 파일이 없으면 자동 생성
+    # users / gamble_stats 테이블도 자동 생성
 
+    await Database.init()
+
+    # ========================================
+    # Discord Bot 시작
+    # ========================================
+
+    async with bot:
+
+        await bot.start(
+            TOKEN
+        )
+
+
+# ============================================
+# 실행
+# ============================================
 
 if __name__ == "__main__":
-    asyncio.run(main())
+
+    asyncio.run(
+        main()
+    )
